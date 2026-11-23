@@ -1,0 +1,8 @@
+Shop is deployed in namespace {{ .Release.Namespace }}.
+
+Customer page:  http://localhost:8080   (kind NodePort)  or  kubectl -n {{ .Release.Namespace }} port-forward svc/frontend 3000:3000
+Admin page:     http://localhost:8080/admin/   (stop/start robot customer, restock)
+
+Admin login:
+  user:     {{ .Values.admin.user }}
+  password: kubectl -n {{ .Release.Namespace }} get secret shop-admin -o jsonpath='{.data.password}' | base64 -d; echo

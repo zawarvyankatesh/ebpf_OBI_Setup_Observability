@@ -4,14 +4,24 @@
 #   obi-poc-worker  : frontend, inventory, payments
 #   obi-poc-worker2 : orders, postgres, redis, loadgen
 
+# Admin login for /admin and loadgen's restock call (Secret "shop-admin").
+# Empty password = random on first install, then kept across upgrades.
+admin:
+  user: admin
+  password: ""
+
 frontend:
-  image: shop/frontend:0.1.0
+  image: shop/frontend:0.2.1
   node: obi-poc-worker
   port: 3000
   nodePort: 30080            # kind maps 127.0.0.1:8080 -> this
   env:
     ORDERS_URL: http://orders:8000
     INVENTORY_URL: http://inventory:8080
+    ADMIN_USER: admin
+    ROBOT_ENABLED: "true"    # robot customer state after a frontend restart
+  secretEnv:
+    ADMIN_PASSWORD: { secret: shop-admin, key: password }
   resources:
     requests: { cpu: 10m, memory: 48Mi }
     limits:   { cpu: 200m, memory: 128Mi }
@@ -52,11 +62,14 @@ payments:
 
 loadgen:
   enabled: true
-  image: shop/loadgen:0.1.2
+  image: shop/loadgen:0.2.0
   node: obi-poc-worker2
   env:
     TARGET: http://frontend:3000
     SLEEP: "1"               # seconds between loops (~2-3 requests per loop)
+    ADMIN_USER: admin
+  secretEnv:
+    ADMIN_PASSWORD: { secret: shop-admin, key: password }
   resources:
     requests: { cpu: 5m, memory: 8Mi }
     limits:   { cpu: 50m, memory: 32Mi }

@@ -270,3 +270,44 @@ kubectl -n shop port-forward svc/orders    8000:8000     # http://localhost:8000
 kubectl -n shop port-forward svc/inventory 8081:8080     # http://localhost:8081/items
 kubectl -n shop port-forward svc/payments  5000:5000     # curl -X POST localhost:5000/pay ...
 ```
+
+---
+
+## App change: admin area + robot customer switch (2026-11-23)
+
+Why: Restock was public (anyone could call it), and there was no way to pause loadgen from the UI.
+
+### What changed
+- **frontend 0.2.1**
+  - `/` customer page: stock, Buy, recent orders, robot status. **No restock button.**
+  - `/admin/` admin page (**HTTP Basic Auth**): Start/Stop robot customer, Restock.
+  - `GET /api/robot` (public, loadgen reads it), `POST /admin/api/robot {"enabled":bool}`, `POST /admin/api/restock` (login needed).
+  - Old `POST /api/restock` removed (now 404).
+  - Robot switch is kept in memory: a frontend restart resets it to `ROBOT_ENABLED` (default `true`).
+  - 0.2.0 had a redirect loop on `/admin/` (Express 5 matches `/admin` and `/admin/` the same) → fixed in 0.2.1.
+- **loadgen 0.2.0**: checks `GET /api/robot` every 5th loop (every 5 s when paused); restock uses admin login.
+- **Helm chart 0.2.0**: Secret `shop-admin` (random 16-char password on first install, kept on upgrades via `lookup`; override with `--set admin.password=...`). `NOTES.txt` prints how to get it.
+
+### Commands
+```bash
+make build && make load && make deploy
+
+# admin password
+kubectl -n shop get secret shop-admin -o jsonpath='{.data.password}' | base64 -d; echo
+```
+
+### Verify
+```bash
+PW=$(kubectl -n shop get secret shop-admin -o jsonpath='{.data.password}' | base64 -d); U=http://localhost:8080
+curl -s -o /dev/null -w '%{http_code}\n' -X POST $U/api/restock            # 404 (removed)
+curl -s -o /dev/null -w '%{http_code}\n' $U/admin/                          # 401
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:wrong $U/admin/           # 401
+curl -s -o /dev/null -w '%{http_code}\n' -u admin:$PW $U/admin/             # 200
+
+# stop / start the robot customer
+curl -s -u admin:$PW -X POST $U/admin/api/robot -H 'content-type: application/json' -d '{"enabled":false}'
+kubectl -n shop logs deploy/loadgen --tail=3        # "paused by admin" within ~5 s
+curl -s -u admin:$PW -X POST $U/admin/api/robot -H 'content-type: application/json' -d '{"enabled":true}'
+kubectl -n shop logs deploy/loadgen --tail=3        # "resumed by admin"
+```
+Note: `inventory` `/restock` itself has no auth; it is only reachable inside the cluster. A NetworkPolicy would lock it down (not done, POC).

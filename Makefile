@@ -1,7 +1,7 @@
 CLUSTER := obi-poc
 
 # image tags: keep in sync with helm/shop/values.yaml
-IMAGES := shop/payments:0.1.0 shop/inventory:0.1.0 shop/orders:0.1.0 shop/frontend:0.1.0 shop/loadgen:0.1.2
+IMAGES := shop/payments:0.1.0 shop/inventory:0.1.0 shop/orders:0.1.0 shop/frontend:0.2.1 shop/loadgen:0.2.0
 
 .PHONY: cluster nodes build load deploy status pf clean
 
