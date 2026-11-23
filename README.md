@@ -14,8 +14,8 @@ Zero-code traces and metrics for a small microservices app, using **OBI** (OpenT
 | 1 | kind cluster `obi-poc` (1 control-plane + 2 workers) | done |
 | 2 | Microservices (no tracing code) | done |
 | 3 | Helm chart `shop` | done |
-| 4 | Prometheus, Grafana, Tempo, OTel Collector | next |
-| 5 | OBI DaemonSet | |
+| 4 | Prometheus, Grafana, Tempo, OTel Collector | done |
+| 5 | OBI DaemonSet | next |
 | 6 | Dashboards, distributed traces, incidents | |
 
 ## The app
@@ -50,5 +50,12 @@ kubectl -n shop port-forward svc/orders    8000:8000   # http://localhost:8000/d
 kubectl -n shop port-forward svc/inventory 8081:8080   # http://localhost:8081/items
 kubectl -n shop port-forward svc/payments  5000:5000
 ```
+
+Observability (Phase 4):
+```bash
+make obs-repos && make obs      # Prometheus + Grafana, Tempo, OTel Collector
+make grafana-pass               # Grafana password (user: admin)
+```
+Grafana: http://localhost:3000
 
 Clean up: `make clean`.

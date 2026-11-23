@@ -3,7 +3,7 @@ CLUSTER := obi-poc
 # image tags: keep in sync with helm/shop/values.yaml
 IMAGES := shop/payments:0.1.0 shop/inventory:0.1.0 shop/orders:0.1.0 shop/frontend:0.2.1 shop/loadgen:0.2.0
 
-.PHONY: cluster nodes build load deploy status pf clean
+.PHONY: cluster nodes build load deploy status pf obs-repos obs grafana-pass clean
 
 ## Phase 1: create the kind cluster (1 control-plane + 2 workers)
 cluster:
@@ -37,6 +37,26 @@ status:
 ## Open the app at http://localhost:3000 (Ctrl+C to stop). The NodePort also works: http://localhost:8080
 pf:
 	kubectl -n shop port-forward svc/frontend 3000:3000
+
+## Phase 4: Helm repos for the observability stack
+obs-repos:
+	helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+	helm repo add grafana-community https://grafana-community.github.io/helm-charts
+	helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+	helm repo update
+
+## Phase 4: Prometheus + Grafana, Tempo, OTel Collector (pinned chart versions)
+obs:
+	helm upgrade --install kps prometheus-community/kube-prometheus-stack --version 93.9.0 \
+	  -n observability --create-namespace -f observability/values-kube-prometheus-stack.yaml --wait --timeout 10m
+	helm upgrade --install tempo grafana-community/tempo --version 3.2.1 \
+	  -n observability -f observability/values-tempo.yaml --wait --timeout 5m
+	helm upgrade --install otel-collector open-telemetry/opentelemetry-collector --version 0.182.0 \
+	  -n observability -f observability/values-otel-collector.yaml --wait --timeout 5m
+
+## Grafana admin password (user: admin)
+grafana-pass:
+	@kubectl -n observability get secret kps-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
 
 ## Delete everything
 clean:

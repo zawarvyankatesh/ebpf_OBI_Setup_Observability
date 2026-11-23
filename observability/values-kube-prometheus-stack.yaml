@@ -1,0 +1,120 @@
+# kube-prometheus-stack 93.9.0 (Prometheus v3.16.0, Grafana chart 14.5.0) - LEAN laptop setup.
+# Prometheus receives app metrics by PUSH over OTLP (from the OTel Collector),
+# and still SCRAPES the kubelet/cAdvisor for container CPU/RAM (needed for OBI overhead later).
+
+fullnameOverride: kps          # short names: kps-prometheus, kps-operator, ...
+
+# ---- things we don't need on a laptop POC ----
+defaultRules:
+  create: false                # most default rules need node-exporter / kube-state-metrics
+alertmanager:
+  enabled: false
+nodeExporter:
+  enabled: false               # node metrics later with our own eBPF exporter (Phase 9)
+kubeStateMetrics:
+  enabled: false               # OBI adds k8s labels itself
+windowsMonitoring:
+  enabled: false
+# control-plane components: not reachable in kind by default -> would show as "down"
+kubeApiServer:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+kubeEtcd:
+  enabled: false
+coreDns:
+  enabled: false
+kubeDns:
+  enabled: false
+
+# ---- keep: kubelet + cAdvisor (container CPU / memory) ----
+kubelet:
+  enabled: true
+  serviceMonitor:
+    cAdvisor: true
+    probes: false
+    resource: false
+
+prometheusOperator:
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 30s
+    evaluationInterval: 30s
+    retention: 6h
+    retentionSize: 1GB
+    # pick up ServiceMonitors/PodMonitors from any release (not only this one)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+    # Native OTLP receiver: POST /api/v1/otlp/v1/metrics  (flag --web.enable-otlp-receiver)
+    # ref: https://prometheus.io/docs/guides/opentelemetry/
+    enableOTLPReceiver: true
+    otlp:
+      # turn these OTel resource attributes into normal Prometheus labels
+      promoteResourceAttributes:
+        - service.name
+        - service.namespace
+        - service.instance.id
+        - k8s.namespace.name
+        - k8s.deployment.name
+        - k8s.pod.name
+        - k8s.node.name
+        - k8s.container.name
+      keepIdentifyingResourceAttributes: true
+    tsdb:
+      outOfOrderTimeWindow: 30m  # recommended for OTLP push (late/out-of-order samples)
+
+    resources:
+      requests: { cpu: 50m, memory: 200Mi }
+      limits:   { cpu: 500m, memory: 600Mi }
+    # no storageSpec = emptyDir (data lost on pod restart; fine for a POC)
+
+grafana:
+  enabled: true
+  # adminPassword not set: chart generates a random one and keeps it (Secret "kps-grafana")
+  defaultDashboardsEnabled: false    # they need node-exporter / kube-state-metrics; we build our own
+  testFramework:
+    enabled: false
+  service:
+    type: NodePort
+    nodePort: 30300                  # kind maps 127.0.0.1:3000 -> this
+  # Grafana 13 needs ~240Mi and a lot of CPU while starting. With cpu limit 300m it took
+  # >160s to start and the liveness probe killed it -> keep the CPU limit high (it's only a ceiling).
+  resources:
+    requests: { cpu: 50m, memory: 160Mi }
+    limits:   { cpu: 1000m, memory: 512Mi }
+  sidecar:
+    # k8s-sidecar was OOMKilled at 96Mi
+    resources:
+      requests: { cpu: 5m, memory: 64Mi }
+      limits:   { cpu: 100m, memory: 192Mi }
+  grafana.ini:
+    analytics:
+      reporting_enabled: false
+      check_for_updates: false
+  # Prometheus datasource is created by the chart (uid: prometheus). Add Tempo:
+  additionalDataSources:
+    - name: Tempo
+      type: tempo
+      uid: tempo
+      url: http://tempo.observability:3200
+      access: proxy
+      jsonData:
+        # from a span -> jump to the RED metrics of that service in Prometheus
+        tracesToMetrics:
+          datasourceUid: prometheus
+        # Service graph tab uses metrics in Prometheus (we'll produce them in Phase 6)
+        serviceMap:
+          datasourceUid: prometheus
+        nodeGraph:
+          enabled: true
+        search:
+          hide: false

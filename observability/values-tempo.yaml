@@ -1,0 +1,25 @@
+# grafana-community/tempo 3.2.1 (Tempo 3.1.1), monolithic / single binary.
+# (The old grafana/tempo chart moved to grafana-community after 2026-01-30.)
+tempo:
+  repository: grafana/tempo
+  tag: "3.1.1"
+  reportingEnabled: false        # no usage stats to Grafana Labs
+  retention: 2h                  # laptop: keep traces 2 hours
+  # The Collector sends OTLP/gRPC. The chart's default Jaeger receivers stay on:
+  # its Service template requires them (setting jaeger: null breaks rendering). Idle ports, no cost.
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+  metricsGenerator:
+    enabled: false               # Phase 6 decides how we build the service graph
+  resources:
+    requests: { cpu: 20m, memory: 96Mi }
+    limits:   { cpu: 500m, memory: 384Mi }
+
+# no persistence = emptyDir (traces lost on pod restart; fine for a POC)
+persistence:
+  enabled: false

@@ -33,3 +33,13 @@ Short, simple notes per phase. Commands are in [runbook.md](runbook.md).
 - `kind load docker-image` fails on multi-arch official images; nodes can just pull them.
 - Whole app ≈ 0.25 GB RAM; cluster + app ≈ 2.2 GB.
 - **We are blind right now**: the app works, but we have no metrics (except pod CPU/RAM), no traces, no idea which call is slow. Only logs. OBI will fix that without touching code.
+
+## Phase 4: Observability backend
+- Flow: (OBI) → **OTel Collector** → traces to **Tempo**, metrics to **Prometheus** → **Grafana** shows both.
+- **Prometheus native OTLP receiver** (3.x): the Collector *pushes* OTLP to `/api/v1/otlp`. No scrape, no remote-write conversion. `promoteResourceAttributes` turns OTel resource attributes (`service.name`, `k8s.pod.name`…) into labels (`service_name`, `k8s_pod_name`), so PromQL can filter by service.
+- Push needs `outOfOrderTimeWindow` (late samples are normal with push).
+- Things move fast: Tempo's chart changed repo (grafana-community), Collector components were renamed (`otlp_grpc`, `otlp_http`). Always check, never trust memory.
+- Resource limits are a **ceiling**, requests are the **reservation**. Too-low CPU limit = slow start = liveness probe kills it (Grafana). Too-low memory limit = OOMKilled (sidecars).
+- The Collector listens on the **pod IP**, so `kubectl port-forward` to it fails; test from inside the cluster.
+- Helm merges maps; `key: null` removes a default (works for the Collector, broke Tempo's chart).
+- Checkpoint state: Grafana works, datasources green, **no app data yet**. The shop is still a black box.

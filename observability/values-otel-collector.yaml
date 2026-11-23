@@ -1,0 +1,57 @@
+# open-telemetry/opentelemetry-collector 0.182.0 (Collector 0.165.0).
+# One small Deployment: receives OTLP (from OBI in Phase 5) and fans out:
+#   traces  -> Tempo       (OTLP/gRPC)
+#   metrics -> Prometheus  (OTLP/HTTP, Prometheus' native OTLP receiver)
+# Note: since 0.16x the exporters are named otlp_grpc / otlp_http (old: otlp / otlphttp).
+
+mode: deployment
+fullnameOverride: otel-collector   # service: otel-collector.observability:4317 (gRPC) / :4318 (HTTP)
+
+image:
+  # "k8s" distribution: smaller than contrib, has everything we need
+  repository: otel/opentelemetry-collector-k8s
+  tag: "0.165.0"
+command:
+  name: otelcol-k8s
+
+resources:
+  requests: { cpu: 20m, memory: 64Mi }
+  limits:   { cpu: 300m, memory: 256Mi }   # memory_limiter uses 80% of this
+
+# only OTLP ports (drop jaeger / zipkin)
+ports:
+  jaeger-compact:
+    enabled: false
+  jaeger-thrift:
+    enabled: false
+  jaeger-grpc:
+    enabled: false
+  zipkin:
+    enabled: false
+
+config:
+  receivers:
+    jaeger: null
+    zipkin: null
+    # (default) "prometheus" receiver scrapes the Collector's own metrics on :8888
+  exporters:
+    otlp_grpc/tempo:
+      endpoint: tempo.observability:4317
+      tls:
+        insecure: true
+    otlp_http/prometheus:
+      # the exporter appends /v1/metrics -> /api/v1/otlp/v1/metrics
+      endpoint: http://kps-prometheus.observability:9090/api/v1/otlp
+      tls:
+        insecure: true
+  service:
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp_grpc/tempo]
+      metrics:
+        receivers: [otlp, prometheus]      # app metrics + Collector self-metrics
+        processors: [memory_limiter, batch]
+        exporters: [otlp_http/prometheus]
+      logs: null                            # OBI doesn't send logs

@@ -311,3 +311,81 @@ curl -s -u admin:$PW -X POST $U/admin/api/robot -H 'content-type: application/js
 kubectl -n shop logs deploy/loadgen --tail=3        # "resumed by admin"
 ```
 Note: `inventory` `/restock` itself has no auth; it is only reachable inside the cluster. A NetworkPolicy would lock it down (not done, POC).
+
+---
+
+## Phase 4: Observability backend (2026-11-23)
+
+### 4.1 Check current charts (not memory)
+```bash
+make obs-repos     # prometheus-community, grafana-community, open-telemetry
+helm search repo -l prometheus-community/kube-prometheus-stack | head -3   # 93.9.0 (Prometheus v3.16.0, Grafana 13.3.1)
+helm search repo tempo                                                    # grafana-community/tempo 3.2.1 (Tempo 3.1.1)
+helm search repo open-telemetry/opentelemetry-collector                   # 0.182.0 (Collector 0.165.0)
+```
+Findings:
+- **Tempo chart moved** from `grafana/tempo` (stuck at Tempo 2.9.0) to **`grafana-community/tempo`** (official notice: updates only there after 2026-01-30).
+- Prometheus 3.x has a **native OTLP receiver** (`--web.enable-otlp-receiver`, path `/api/v1/otlp/v1/metrics`); chart key `prometheus.prometheusSpec.enableOTLPReceiver`.
+- Collector 0.165.0 renamed components: exporters **`otlp_grpc` / `otlp_http`** (old `otlp` / `otlphttp`), processor `k8s_attributes`.
+
+Read chart values offline (`helm show values` hung once while downloading):
+```bash
+helm pull prometheus-community/kube-prometheus-stack --version 93.9.0 --untar -d /tmp/charts
+helm pull grafana-community/tempo --version 3.2.1 --untar -d /tmp/charts
+helm pull open-telemetry/opentelemetry-collector --version 0.182.0 --untar -d /tmp/charts
+# component names straight from the binary:
+docker run --rm otel/opentelemetry-collector-k8s:0.165.0 components
+```
+
+### 4.2 Values files
+- `observability/values-kube-prometheus-stack.yaml`: lean (no Alertmanager, node-exporter, kube-state-metrics, default rules/dashboards, control-plane scrapes); keeps kubelet + cAdvisor; retention 6h / 1GB; scrape 30s; OTLP receiver + promoted resource attributes + 30m out-of-order window; Grafana NodePort 30300 + Tempo datasource.
+- `observability/values-tempo.yaml`: Tempo 3.1.1 monolithic, retention 2h, emptyDir, metrics-generator off.
+- `observability/values-otel-collector.yaml`: `otel/opentelemetry-collector-k8s:0.165.0`, Deployment, name `otel-collector`; traces → `otlp_grpc/tempo`, metrics → `otlp_http/prometheus`; logs pipeline removed.
+
+Validate before install:
+```bash
+helm template kps /tmp/charts/kube-prometheus-stack -n observability -f observability/values-kube-prometheus-stack.yaml > /tmp/kps.yaml
+helm template tempo /tmp/charts/tempo -n observability -f observability/values-tempo.yaml > /tmp/tempo.yaml
+helm template otel-collector /tmp/charts/opentelemetry-collector -n observability -f observability/values-otel-collector.yaml > /tmp/otel.yaml
+# validate the rendered collector config with the real binary:
+python3 -c 'import yaml;[open("/tmp/relay.yaml","w").write(d["data"]["relay"]) for d in yaml.safe_load_all(open("/tmp/otel.yaml")) if d and d["kind"]=="ConfigMap"]'
+docker run --rm -e MY_POD_IP=127.0.0.1 -v /tmp/relay.yaml:/c.yaml:ro otel/opentelemetry-collector-k8s:0.165.0 validate --config=/c.yaml
+```
+Gotcha: Tempo chart's Service template needs `tempo.receivers.jaeger` → `jaeger: null` breaks rendering, so the Jaeger receivers stay (idle).
+
+### 4.3 Install
+```bash
+make obs           # kps -> tempo -> otel-collector (pinned versions, --wait)
+make grafana-pass  # Grafana admin password (user admin)
+```
+Problem on first install: `kps` failed (`context deadline exceeded`):
+- `grafana-sc-dashboard` / `grafana-sc-datasources` **OOMKilled** at 96Mi → limit 192Mi.
+- Grafana killed by **liveness probe**: with cpu limit 300m, Grafana 13 needed >160 s to start (and ~240Mi RAM) → limits cpu 1000m / 512Mi.
+Debug commands:
+```bash
+kubectl -n observability get pod -l app.kubernetes.io/name=grafana -o jsonpath='{range .status.containerStatuses[*]}{.name} {.lastState.terminated.reason}{"\n"}{end}'
+kubectl -n observability logs deploy/kps-grafana -c grafana --previous --tail=15
+kubectl -n observability get events --sort-by=.lastTimestamp | grep grafana
+```
+Image pulls were slow (~2–3 min each), so the first install took ~20 min.
+
+### 4.4 Verify
+```bash
+GP=$(make -s grafana-pass)
+curl -s -u admin:$GP localhost:3000/api/health
+curl -s -u admin:$GP localhost:3000/api/datasources/uid/prometheus/health    # "status":"OK"
+curl -s -u admin:$GP localhost:3000/api/datasources/uid/tempo/health         # "status":"OK"
+
+kubectl -n observability port-forward svc/kps-prometheus 9090:9090 &
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=otelcol_process_memory_rss' | jq '.data.result[0].metric'   # arrived via OTLP
+curl -s localhost:9090/api/v1/targets | jq -r '.data.activeTargets[] | "\(.labels.job) \(.health)"' | sort | uniq -c
+
+# test span: must be sent from INSIDE the cluster (Collector listens on the pod IP, so port-forward to it fails)
+TID=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n'); SID=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n'); NOW=$(date +%s%N)
+kubectl -n shop exec deploy/loadgen -- curl -s -w '%{http_code}\n' http://otel-collector.observability:4318/v1/traces \
+  -H 'content-type: application/json' -d "{\"resourceSpans\":[{\"resource\":{\"attributes\":[{\"key\":\"service.name\",\"value\":{\"stringValue\":\"pipeline-test\"}}]},\"scopeSpans\":[{\"spans\":[{\"traceId\":\"$TID\",\"spanId\":\"$SID\",\"name\":\"hello-tempo\",\"kind\":2,\"startTimeUnixNano\":\"$((NOW-50000000))\",\"endTimeUnixNano\":\"$NOW\"}]}]}]}"
+kubectl -n observability port-forward svc/tempo 3200:3200 &
+curl -s localhost:3200/api/v2/traces/$TID | grep -o hello-tempo
+```
+Result: Grafana 13.3.1 OK, both datasources OK, Collector metrics in Prometheus with promoted labels, test span in Tempo, kubelet/cAdvisor targets up.
+RAM after Phase 4: node containers ≈ 1.2 + 1.5 + 0.8 GB; ~3.8 GB still available.
