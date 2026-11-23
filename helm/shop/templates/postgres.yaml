@@ -1,0 +1,62 @@
+{{- $p := .Values.postgres -}}
+{{- $ctx := dict "name" "postgres" "root" $ -}}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres
+  labels: {{- include "shop.labels" $ctx | nindent 4 }}
+type: Opaque
+stringData:
+  password: {{ $p.password | quote }}
+  database-url: "postgresql://{{ $p.user }}:{{ $p.password }}@postgres:5432/{{ $p.database }}"
+---
+# POC: emptyDir = data is lost when the pod restarts. Fine for a demo.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels: {{- include "shop.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+  template:
+    metadata:
+      labels: {{- include "shop.labels" $ctx | nindent 8 }}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ $p.node }}
+      containers:
+        - name: postgres
+          image: {{ $p.image }}
+          # small memory settings for a laptop
+          args: ["-c", "shared_buffers=16MB", "-c", "max_connections=20"]
+          env:
+            - { name: POSTGRES_USER, value: {{ $p.user | quote }} }
+            - { name: POSTGRES_DB, value: {{ $p.database | quote }} }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: postgres, key: password }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", {{ $p.user | quote }}, "-d", {{ $p.database | quote }}] }
+            periodSeconds: 10
+          resources: {{- toYaml $p.resources | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql }
+      volumes:
+        - { name: data, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels: {{- include "shop.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    app.kubernetes.io/name: postgres
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }

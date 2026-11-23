@@ -1,0 +1,3 @@
+{{- if .Values.loadgen.enabled }}
+{{ include "shop.app" (dict "name" "loadgen" "root" $ "svc" .Values.loadgen) }}
+{{- end }}

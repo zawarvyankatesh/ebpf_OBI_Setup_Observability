@@ -1,0 +1,79 @@
+# shop: minimal values. 1 replica each, small requests/limits (laptop).
+#
+# Placement (nodeSelector) is on purpose, to create cross-node calls:
+#   obi-poc-worker  : frontend, inventory, payments
+#   obi-poc-worker2 : orders, postgres, redis, loadgen
+
+frontend:
+  image: shop/frontend:0.1.0
+  node: obi-poc-worker
+  port: 3000
+  nodePort: 30080            # kind maps 127.0.0.1:8080 -> this
+  env:
+    ORDERS_URL: http://orders:8000
+    INVENTORY_URL: http://inventory:8080
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+
+orders:
+  image: shop/orders:0.1.0
+  node: obi-poc-worker2
+  port: 8000
+  env:
+    INVENTORY_URL: http://inventory:8080
+    PAYMENTS_URL: http://payments:5000
+  secretEnv:
+    DATABASE_URL: { secret: postgres, key: database-url }
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits:   { cpu: 200m, memory: 160Mi }
+
+inventory:
+  image: shop/inventory:0.1.0
+  node: obi-poc-worker
+  port: 8080
+  env:
+    REDIS_ADDR: redis:6379
+  resources:
+    requests: { cpu: 5m, memory: 8Mi }
+    limits:   { cpu: 100m, memory: 64Mi }
+
+payments:
+  image: shop/payments:0.1.0
+  node: obi-poc-worker
+  port: 5000
+  env:
+    DELAY_MS_MAX: "50"       # Phase 6: raise to create a latency incident
+    ERROR_RATE: "0.02"       # Phase 6: raise to create an error incident
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits:   { cpu: 200m, memory: 128Mi }
+
+loadgen:
+  enabled: true
+  image: shop/loadgen:0.1.2
+  node: obi-poc-worker2
+  env:
+    TARGET: http://frontend:3000
+    SLEEP: "1"               # seconds between loops (~2-3 requests per loop)
+  resources:
+    requests: { cpu: 5m, memory: 8Mi }
+    limits:   { cpu: 50m, memory: 32Mi }
+
+postgres:
+  image: postgres:18.7-alpine
+  node: obi-poc-worker2
+  user: shop
+  password: shop             # POC only (local laptop)
+  database: shop
+  resources:
+    requests: { cpu: 10m, memory: 48Mi }
+    limits:   { cpu: 300m, memory: 192Mi }
+
+redis:
+  image: redis:8.10.3-alpine
+  node: obi-poc-worker2
+  resources:
+    requests: { cpu: 5m, memory: 8Mi }
+    limits:   { cpu: 100m, memory: 64Mi }

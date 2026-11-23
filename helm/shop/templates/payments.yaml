@@ -1,0 +1,1 @@
+{{ include "shop.app" (dict "name" "payments" "root" $ "svc" .Values.payments) }}
