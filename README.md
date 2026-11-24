@@ -15,8 +15,8 @@ Zero-code traces and metrics for a small microservices app, using **OBI** (OpenT
 | 2 | Microservices (no tracing code) | done |
 | 3 | Helm chart `shop` | done |
 | 4 | Prometheus, Grafana, Tempo, OTel Collector | done |
-| 5 | OBI DaemonSet | next |
-| 6 | Dashboards, distributed traces, incidents | |
+| 5 | OBI DaemonSet (observe only, least privilege) | done |
+| 6 | Dashboards, distributed traces, incidents | next |
 
 ## The app
 
@@ -57,5 +57,13 @@ make obs-repos && make obs      # Prometheus + Grafana, Tempo, OTel Collector
 make grafana-pass               # Grafana password (user: admin)
 ```
 Grafana: http://localhost:3000
+
+OBI (Phase 5):
+```bash
+make obi            # install/upgrade OBI (unprivileged, no context propagation, ns shop only)
+make bpf-progs      # count eBPF programs in the shared kernel
+make obi-uninstall  # remove OBI (programs are removed from the kernel)
+```
+Always restart app pods after (re)installing OBI.
 
 Clean up: `make clean`.

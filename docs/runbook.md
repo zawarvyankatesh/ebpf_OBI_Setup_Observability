@@ -389,3 +389,77 @@ curl -s localhost:3200/api/v2/traces/$TID | grep -o hello-tempo
 ```
 Result: Grafana 13.3.1 OK, both datasources OK, Collector metrics in Prometheus with promoted labels, test span in Tempo, kubelet/cAdvisor targets up.
 RAM after Phase 4: node containers ≈ 1.2 + 1.5 + 0.8 GB; ~3.8 GB still available.
+
+---
+
+## Phase 5: OBI (2026-11-23/24): observe only, least privilege
+
+### 5.1 Check docs + chart + binary (not memory)
+```bash
+helm search repo open-telemetry | grep -i ebpf        # opentelemetry-ebpf-instrumentation 0.16.4 = OBI v1.0.0
+helm pull open-telemetry/opentelemetry-ebpf-instrumentation --version 0.16.4 --untar -d /tmp/charts
+grep -vE '^\s*#|^\s*$' /tmp/charts/opentelemetry-ebpf-instrumentation/values.yaml | head -80
+helm template obi /tmp/charts/opentelemetry-ebpf-instrumentation -n observability | less     # see chart defaults
+docker pull ghcr.io/open-telemetry/opentelemetry-ebpf-instrumentation/ebpf-instrument:v1.0.0
+# learn exact Config v2 keys from the binary (docs page for export was down):
+docker run --rm -v $PWD/tmp:/w ghcr.io/open-telemetry/opentelemetry-ebpf-instrumentation/ebpf-instrument:v1.0.0 config migrate --allow-partial /w/v1.yml
+```
+**Chart defaults are NOT safe for us** (must override):
+- `privileged: true` → we use `privileged: false` (caps: BPF, PERFMON, SYS_PTRACE, CHECKPOINT_RESTORE, DAC_READ_SEARCH, NET_RAW).
+- `contextPropagation.enabled: true` (adds hostNetwork, NET_ADMIN, cgroup + tracefs mounts) → `false`.
+- default rules instrument **all namespaces** except a fixed list (contains `monitoring`, not our `observability`) → our rules: only `shop`.
+- default exporters go to `${HOST_IP}:4317/4318` + a Prometheus pull port → our OTLP to `otel-collector.observability:4317`.
+- Config v2 key for propagation: `extensions.obi.capture.engine.propagation.context_propagation: disabled`.
+
+### 5.2 "Before" snapshot of the kernel
+```bash
+docker build -t local/bpftool:alpine3.20 tools/bpftool       # Alpine + bpftool, read-only use
+make bpf-progs                                               # 133 programs: 116 cgroup_device (runc), 13 cgroup_skb, ...
+docker run --rm --privileged alpine:3.20 dmesg > /tmp/dmesg-before.txt
+```
+
+### 5.3 Values + validation
+`observability/values-obi.yaml`. Validate the rendered config with the OBI binary:
+```bash
+helm template obi /tmp/charts/opentelemetry-ebpf-instrumentation -n observability -f observability/values-obi.yaml > /tmp/obi.yaml
+python3 -c 'import yaml;[open("/tmp/obi-config.yml","w").write(d["data"]["ebpf-instrument-config.yml"]) for d in yaml.safe_load_all(open("/tmp/obi.yaml")) if d and d["kind"]=="ConfigMap"]'
+docker run --rm -v /tmp:/w ghcr.io/open-telemetry/opentelemetry-ebpf-instrumentation/ebpf-instrument:v1.0.0 config validate /w/obi-config.yml
+grep -nE 'hostPID|hostNetwork|privileged|add:|- [A-Z_]+$|hostPath' /tmp/obi.yaml     # no hostNetwork, no hostPath, 6 caps
+```
+
+### 5.4 Install, then restart apps AFTER OBI
+```bash
+make obi                       # helm upgrade --install obi ... --version 0.16.4 -f observability/values-obi.yaml
+#   (if GitHub download times out: helm upgrade --install obi /tmp/charts/opentelemetry-ebpf-instrumentation ...)
+kubectl -n observability logs ds/obi-opentelemetry-ebpf-instrumentation | grep 'instrumenting process'
+kubectl -n shop rollout restart deploy/frontend deploy/orders deploy/inventory deploy/payments deploy/loadgen
+```
+Don't restart redis/postgres: no persistence → stock/orders are wiped (inventory only seeds at startup → 409/500).
+If that happens: admin Restock (`curl -u admin:$PW -X POST localhost:8080/admin/api/restock`).
+
+Log warnings/errors seen (least-privilege side effects):
+- `join target netns: operation not permitted` → can't scan sockets opened before OBI (needs SYS_ADMIN) → restart apps.
+- `tracefs fallback failed` + Node.js `unable to capture stable node injection target` → Node.js runtime extras off (frontend).
+- `creating bpffs otel path` → no `/sys/fs/bpf` mount, maps stay in-process (cleaner rollback).
+- EC2 metadata timeout, cluster name → set `OTEL_EBPF_KUBE_CLUSTER_NAME=obi-poc`.
+
+### 5.5 Verify data (zero code changes)
+```bash
+kubectl -n observability port-forward svc/kps-prometheus 9090:9090 &
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=count by (__name__) ({k8s_namespace_name="shop"})' | jq -r '.data.result[].metric.__name__'
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=sum by (service_name, http_route, http_response_status_code) (rate(http_server_request_duration_seconds_count{k8s_namespace_name="shop"}[2m]))'
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=sum by (service_name, db_system_name, db_operation_name) (db_client_operation_duration_seconds_count{k8s_namespace_name="shop"})'
+kubectl -n observability port-forward svc/tempo 3200:3200 &
+curl -s -G localhost:3200/api/search --data-urlencode 'q={resource.service.name="frontend" && name="GET /api/items"}' --data-urlencode limit=1
+```
+Note: right after a restart `rate()` looks wrong (new series, only 1 sample at 15 s interval). Compare raw counters instead.
+
+### 5.6 See the eBPF programs + rollback test
+```bash
+make bpf-progs                 # 501 programs after OBI (+398: 351 kprobe/uprobe, 6 socket_filter, 2 tracing, 2 tracepoint, + new pods' cgroup_device)
+docker run --rm --privileged alpine:3.20 dmesg | tail -50     # no bpf/verifier/oops lines
+make obi-uninstall             # helm uninstall obi
+make bpf-progs                 # obi_* programs: 361 -> 0, total back to ~132
+make obi && kubectl -n shop rollout restart deploy/frontend deploy/orders deploy/inventory deploy/payments deploy/loadgen
+```
+OBI memory: ~420 MiB on worker (Node+Go+Python), ~250 MiB on worker2 → limit raised to 768Mi.

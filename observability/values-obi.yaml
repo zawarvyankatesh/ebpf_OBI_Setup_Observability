@@ -1,0 +1,85 @@
+# OBI = OpenTelemetry eBPF Instrumentation, chart open-telemetry/opentelemetry-ebpf-instrumentation 0.16.4 (OBI v1.0.0).
+#
+# SAFETY FIRST (Phase 5 = observe only):
+#  - privileged: false  -> only the capabilities OBI docs list for "application observability":
+#      BPF, PERFMON (load eBPF + attach probes), SYS_PTRACE + CHECKPOINT_RESTORE + DAC_READ_SEARCH
+#      (read other processes' /proc and binaries, to find functions for uprobes), NET_RAW.
+#    NOT added: SYS_ADMIN (would allow writing into Go process memory), NET_ADMIN (would allow
+#    changing packets / traffic control).
+#  - contextPropagation.enabled: false -> chart does NOT add hostNetwork, NET_ADMIN, cgroup/tracefs mounts.
+#    The chart default is TRUE, so this must be set explicitly. We turn it on in Phase 6.
+#  - config: capture.engine.propagation.context_propagation: disabled (key verified with `obi config migrate`).
+#  - only namespace "shop" is instrumented; everything else is excluded.
+
+image:
+  tag: v1.0.0
+
+privileged: false
+contextPropagation:
+  enabled: false
+preset: application          # -> hostPID: true (OBI must see the processes on its node)
+
+env:
+  OTEL_EBPF_KUBE_CLUSTER_NAME: obi-poc   # OBI can't auto-detect it on kind
+
+# Measured: ~420Mi on the node running Node+Go+Python apps, ~250Mi on the other.
+resources:
+  requests: { cpu: 50m, memory: 256Mi }
+  limits:   { cpu: 500m, memory: 768Mi }
+
+# Config v2 (stable in OBI 1.0). The chart merges this over its defaults; because we set
+# capture.rules, the chart's default "instrument all namespaces" rules are dropped.
+config:
+  data:
+    file_format: "1.0"
+    log_level: info
+
+    # traces -> OTel Collector (OTLP/gRPC)
+    tracer_provider:
+      processors:
+        - batch:
+            schedule_delay: 5000          # ms; default 15000. Faster to see spans in a demo.
+            exporter:
+              otlp_grpc:
+                endpoint: http://otel-collector.observability:4317
+                tls:
+                  insecure: true
+
+    # metrics -> OTel Collector (OTLP/gRPC) every 15 s. No Prometheus pull port on OBI.
+    meter_provider:
+      readers:
+        - periodic:
+            interval: 15000               # ms; default 60000
+            exporter:
+              otlp_grpc:
+                endpoint: http://otel-collector.observability:4317
+                tls:
+                  insecure: true
+
+    extensions:
+      obi:
+        version: "2.0"
+        capture:
+          policy:
+            default_action: exclude       # nothing is instrumented unless a rule includes it
+            match_order: first_match_wins
+          rules:
+            - name: exclude-obi-and-collectors
+              action: exclude
+              match:
+                process:
+                  exe_path_glob: ['{*/obi,obi,*ebpf-instrument*,*otelcol*}']
+            - name: include-shop
+              action: include
+              match:
+                kubernetes:
+                  namespace_glob: ['shop']
+          metrics:
+            features: [application]       # RED metrics per service. Service graph comes in Phase 6.
+          engine:
+            propagation:
+              context_propagation: disabled   # Phase 6 will set "all"
+        enrich:
+          enrichers:
+            kubernetes:
+              mode: enabled               # add k8s.namespace/deployment/pod/node names

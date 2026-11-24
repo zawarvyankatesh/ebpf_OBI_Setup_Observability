@@ -3,7 +3,7 @@ CLUSTER := obi-poc
 # image tags: keep in sync with helm/shop/values.yaml
 IMAGES := shop/payments:0.1.0 shop/inventory:0.1.0 shop/orders:0.1.0 shop/frontend:0.2.1 shop/loadgen:0.2.0
 
-.PHONY: cluster nodes build load deploy status pf obs-repos obs grafana-pass clean
+.PHONY: cluster nodes build load deploy status pf obs-repos obs grafana-pass obi obi-uninstall bpf-progs clean
 
 ## Phase 1: create the kind cluster (1 control-plane + 2 workers)
 cluster:
@@ -57,6 +57,21 @@ obs:
 ## Grafana admin password (user: admin)
 grafana-pass:
 	@kubectl -n observability get secret kps-grafana -o jsonpath='{.data.admin-password}' | base64 -d; echo
+
+## Phase 5: OBI DaemonSet (observe only: unprivileged, no context propagation, ns shop)
+obi:
+	helm upgrade --install obi open-telemetry/opentelemetry-ebpf-instrumentation --version 0.16.4 \
+	  -n observability -f observability/values-obi.yaml --wait --timeout 5m
+
+## Remove OBI (its eBPF programs are detached when the process exits)
+obi-uninstall:
+	helm uninstall obi -n observability
+
+## List eBPF programs in the shared kernel, grouped by type (read-only)
+bpf-progs:
+	@docker build -q -t local/bpftool:alpine3.20 tools/bpftool >/dev/null
+	@docker run --rm --privileged --pid=host local/bpftool:alpine3.20 -j prog show | \
+	  python3 -c 'import json,sys,collections; p=json.load(sys.stdin); print(len(p), "programs:", dict(collections.Counter(x["type"] for x in p)))'
 
 ## Delete everything
 clean:

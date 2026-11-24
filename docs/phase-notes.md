@@ -43,3 +43,16 @@ Short, simple notes per phase. Commands are in [runbook.md](runbook.md).
 - The Collector listens on the **pod IP**, so `kubectl port-forward` to it fails; test from inside the cluster.
 - Helm merges maps; `key: null` removes a default (works for the Collector, broke Tempo's chart).
 - Checkpoint state: Grafana works, datasources green, **no app data yet**. The shop is still a black box.
+
+## Phase 5: OBI (observe only)
+- **Chart defaults ≠ OBI defaults.** OBI keeps context propagation off by default, but the Helm chart sets `contextPropagation.enabled: true` and `privileged: true`. Always render and read before installing.
+- Least privilege works for RED + spans: BPF, PERFMON, SYS_PTRACE, CHECKPOINT_RESTORE, DAC_READ_SEARCH, NET_RAW. Side effects: can't see sockets opened before OBI (no SYS_ADMIN for `setns`) → restart apps; Node.js extras off.
+- **One OBI per node only instruments its node's processes** (hostPID = node container's PID namespace), even though kprobes are kernel-wide. No duplicate spans on kind.
+- Zero code changes gave: HTTP server/client RED metrics, **SQL spans** (Postgres wire protocol), **Redis spans** (RESP), DNS lookups, all with k8s labels.
+- **Same node → joined trace, cross node → split trace** (propagation off). OBI's "black-box" correlation matches client + server of the same TCP connection when ONE OBI instance sees both ends. Across nodes, the trace id must travel in the request → context propagation (Phase 6).
+- Go (inventory): full in-process trace (server → in queue → processing → Redis), thanks to uprobes on Go functions/goroutines.
+- Python FastAPI (orders): every span is its own trace. The asyncio loop → threadpool hop breaks OBI's Python context tracking. Gunicorn (payments) is fine.
+- bpftool: 133 programs before (116 are runc `cgroup_device` = every container already uses eBPF), +~360 `obi_*` programs; uprobes show as type `kprobe`. ~318k instructions passed the verifier. No kernel log errors.
+- **Rollback is clean:** `helm uninstall` → process exits → kernel removes all `obi_*` programs (nothing pinned in bpffs).
+- `rate()` on brand-new series lies for a minute; compare raw counters.
+- App weakness found: inventory seeds Redis only at startup; Redis has no persistence → restarting Redis = empty stock.
