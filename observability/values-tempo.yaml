@@ -16,9 +16,11 @@ tempo:
           endpoint: "0.0.0.0:4318"
   metricsGenerator:
     enabled: false               # Phase 6 decides how we build the service graph
+  # Phase 6: with cpu limit 500m, heavy trace queries made /ready time out -> liveness probe
+  # killed Tempo (exit 137, CPU throttled). Higher ceiling; requests stay small.
   resources:
-    requests: { cpu: 20m, memory: 96Mi }
-    limits:   { cpu: 500m, memory: 384Mi }
+    requests: { cpu: 20m, memory: 128Mi }
+    limits:   { cpu: 1000m, memory: 768Mi }
 
 # no persistence = emptyDir (traces lost on pod restart; fine for a POC)
 persistence:

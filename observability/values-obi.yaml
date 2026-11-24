@@ -1,6 +1,9 @@
 # OBI = OpenTelemetry eBPF Instrumentation, chart open-telemetry/opentelemetry-ebpf-instrumentation 0.16.4 (OBI v1.0.0).
 #
-# SAFETY FIRST (Phase 5 = observe only):
+# Phase 6: context propagation ON (user chose "all" = headers + tcp). OBI now MODIFIES outgoing
+# traffic of shop pods. Still NOT "privileged", but has SYS_ADMIN (lab only, see extraCapabilities).
+#
+# Phase 5 notes (observe only):
 #  - privileged: false  -> only the capabilities OBI docs list for "application observability":
 #      BPF, PERFMON (load eBPF + attach probes), SYS_PTRACE + CHECKPOINT_RESTORE + DAC_READ_SEARCH
 #      (read other processes' /proc and binaries, to find functions for uprobes), NET_RAW.
@@ -15,8 +18,13 @@ image:
   tag: v1.0.0
 
 privileged: false
+# Phase 6 (LAB ONLY, user-approved): on kernel 6.18.14+ OBI must load an "FIONREAD fix-up"
+# eBPF program that uses bpf_probe_write_user -> the verifier only allows it with CAP_SYS_ADMIN.
+# Without it OBI refuses to enable context propagation. Also enables Go library-level propagation.
+extraCapabilities:
+  - SYS_ADMIN
 contextPropagation:
-  enabled: false
+  enabled: true              # Phase 6: chart adds hostNetwork, NET_ADMIN, /sys/fs/cgroup (ro) + /sys/kernel/tracing mounts
 preset: application          # -> hostPID: true (OBI must see the processes on its node)
 
 env:
@@ -78,7 +86,7 @@ config:
             features: [application, application_service_graph]   # RED + "who calls whom" (service map)
           engine:
             propagation:
-              context_propagation: disabled   # Phase 6 will set "all"
+              context_propagation: all        # Phase 6: headers (W3C traceparent) + tcp (TCP option, OBI<->OBI)
         enrich:
           enrichers:
             kubernetes:

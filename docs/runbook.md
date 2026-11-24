@@ -491,3 +491,43 @@ curl -s -u admin:$(make -s grafana-pass) localhost:3000/api/dashboards/uid/shop-
 # POST /api/ds/query with each panel target (Tempo serviceMap is browser-side: "unsupported query type" on the API is expected)
 ```
 Fixes during build: p50 query broken by a text replace; error % showed "no data" with zero 5xx → `(errors or 0 * total) / total`.
+
+### 6.3 Context propagation (user chose "all" = headers + tcp)
+Snapshot first (programs, TC/XDP in each kind node netns, cgroup links, kernel log):
+```bash
+make bpf-progs
+for n in obi-poc-worker obi-poc-worker2; do docker run --rm --privileged --net=container:$n local/bpftool:alpine3.20 net show; done
+docker run --rm --privileged --pid=host local/bpftool:alpine3.20 link show
+```
+Values: `contextPropagation.enabled: true` (chart adds hostNetwork, NET_ADMIN, /sys/fs/cgroup ro + /sys/kernel/tracing mounts) and
+`capture.engine.propagation.context_propagation: all`. Rendered diff checked, `obi config validate` OK.
+
+**Attempt 1 (no SYS_ADMIN): OBI refused.** Log on both nodes:
+`kernel misreports ioctl(FIONREAD) for sockets in a sockhash (kernel commit 929e30f93125, present in 6.6.128+, 6.12.75+, 6.18.14+ and 6.19+)`
+→ `cannot load the FIONREAD compensation ... program obi_fionread_fixup_exit ... cannot use helper bpf_probe_write_user`
+→ `context propagation is disabled`. sk_msg/sock_ops programs were loaded but NOT attached; sockhash maps empty (verified with bpftool).
+
+**Attempt 2 (user approved, LAB ONLY): `extraCapabilities: [SYS_ADMIN]`.** Log: `FIONREAD compensation verified`.
+Also fixed: `join target netns` errors (setns), Go library-level propagation now on.
+```bash
+docker run --rm --privileged --pid=host local/bpftool:alpine3.20 link show      # + 2 cgroup_sock_ops links
+docker run --rm --privileged --pid=host local/bpftool:alpine3.20 map show       # sockhash maps now hold sockets (13, 8)
+```
+TC/XDP stayed 0 (injection happens at socket-message level: sk_msg `obi_packet_extender*`). Kernel log clean. Apps 200.
+
+Result (TraceQL structural queries, last 3 min):
+```
+{resource.service.name="orders" && kind=client} > {resource.service.name="payments" && kind=server}
+```
+| hop | nodes | joined |
+|---|---|---|
+| orders → inventory | w2 → w1 | 43/43 |
+| orders → payments | w2 → w1 | 42/42 |
+| frontend → orders | w1 → w2 | 0/43 (was 10/10 just after enabling) |
+| frontend → inventory | w1 → w1 | 1/45 |
+In-process server→client: inventory (Go) 44, orders (Python asyncio→threadpool) 0, frontend (Node) 1.
+Node.js: `unable to capture stable node injection target ... opening stable reference to process: operation not permitted`
+(frontend runs as uid 1000; OBI probably needs CAP_KILL to send SIGUSR1; unverified).
+loadgen never appears: each curl is a new process living <1 s (OBI min_process_age 5 s).
+
+Tempo got killed by its liveness probe during heavy trace queries (cpu limit 500m, throttled) → limits 1000m / 768Mi.
