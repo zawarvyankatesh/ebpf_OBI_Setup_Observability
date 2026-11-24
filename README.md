@@ -16,7 +16,7 @@ Zero-code traces and metrics for a small microservices app, using **OBI** (OpenT
 | 3 | Helm chart `shop` | done |
 | 4 | Prometheus, Grafana, Tempo, OTel Collector | done |
 | 5 | OBI DaemonSet (observe only, least privilege) | done |
-| 6 | Dashboards, distributed traces, incidents | next |
+| 6 | Dashboards, distributed traces (propagation, SYS_ADMIN lab only), incident demo | done |
 
 ## The app
 
@@ -65,5 +65,13 @@ make bpf-progs      # count eBPF programs in the shared kernel
 make obi-uninstall  # remove OBI (programs are removed from the kernel)
 ```
 Always restart app pods after (re)installing OBI.
+
+Dashboards (Phase 6): `make dashboards` → http://localhost:3000/d/shop-red-obi
+
+Incident demo:
+```bash
+helm upgrade shop ./helm/shop -n shop --reuse-values --set-string payments.env.DELAY_MS_MAX=1500 --set-string payments.env.ERROR_RATE=0.25
+make deploy   # back to normal (uses --reset-values)
+```
 
 Clean up: `make clean`.

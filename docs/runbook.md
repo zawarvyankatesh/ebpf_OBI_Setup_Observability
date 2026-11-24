@@ -531,3 +531,41 @@ Node.js: `unable to capture stable node injection target ... opening stable refe
 loadgen never appears: each curl is a new process living <1 s (OBI min_process_age 5 s).
 
 Tempo got killed by its liveness probe during heavy trace queries (cpu limit 500m, throttled) → limits 1000m / 768Mi.
+
+### 6.4 Incident demo: slow + flaky payments
+Baseline (2m window): payments p95 ~49 ms, orders ~72 ms, frontend ~69 ms, error % ~2–5 %.
+Start (Helm values only, no code):
+```bash
+helm upgrade shop ./helm/shop -n shop --reuse-values \
+  --set-string payments.env.DELAY_MS_MAX=1500 --set-string payments.env.ERROR_RATE=0.25 --wait
+```
+Investigate (dashboard `shop-red-obi`, or PromQL):
+```promql
+# 1. who is slow? -> payments 1345 ms, orders 1793 ms, frontend 1129 ms; inventory 4.7 ms
+histogram_quantile(0.95, sum by (service_name, le) (rate(http_server_request_duration_seconds_bucket{k8s_namespace_name="shop", http_route!="/health"}[2m])))
+# 2. is it the DB? -> postgres / redis p95 4.75 ms: no
+histogram_quantile(0.95, sum by (service_name, db_system_name, le) (rate(db_client_operation_duration_seconds_bucket{k8s_namespace_name="shop"}[2m])))
+# 3. which call? -> orders -> payments p95 1793 ms; orders -> inventory 4.75 ms
+histogram_quantile(0.95, sum by (service_name, server_address, le) (rate(http_client_request_duration_seconds_bucket{k8s_namespace_name="shop"}[2m])))
+sum by (client, server) (rate(traces_service_graph_request_failed_total{client!="incoming"}[2m])) > 0
+```
+Root cause rule: the deepest slow service whose own dependencies are healthy = payments.
+Drill into traces (Tempo / Grafana Explore → TraceQL):
+```
+{resource.service.name="payments" && kind=server && duration > 800ms}
+{resource.service.name="payments" && kind=server && span.http.response.status_code >= 500}
+```
+One joined cross-node trace: orders CLIENT POST /pay (worker2) +1462 ms → payments SERVER (worker) +1461 ms,
+`in queue` 0 ms, `processing` 1461 ms → time is inside payments' code, network ~1 ms.
+
+End the incident: **use `--reset-values`**. Gotcha: `helm upgrade` with no `-f/--set` kept the previous release's
+`--set` values, so a plain `make deploy` re-applied the incident. `make deploy` now passes `--reset-values`.
+```bash
+helm get values shop -n shop      # shows leftover user-supplied values
+make deploy                       # = helm upgrade --install ... --reset-values
+```
+Incident window on the dashboard: 04:57 → 05:11 UTC (2026-11-24). payments p95 back to ~48 ms.
+
+### Current OBI state after Phase 6
+contextPropagation on (`all`), hostNetwork, NET_ADMIN, **SYS_ADMIN (lab only)**. To go back to Phase 5 least privilege:
+set `contextPropagation.enabled: false`, `context_propagation: disabled`, remove `extraCapabilities`, then `make obi` + restart apps.

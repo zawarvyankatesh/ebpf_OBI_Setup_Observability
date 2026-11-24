@@ -27,7 +27,7 @@ load:
 
 ## Phase 3: install/upgrade the shop chart
 deploy:
-	helm upgrade --install shop ./helm/shop -n shop --create-namespace --wait --timeout 5m
+	helm upgrade --install shop ./helm/shop -n shop --create-namespace --reset-values --wait --timeout 5m
 
 ## Pods, placement, and last loadgen lines
 status:

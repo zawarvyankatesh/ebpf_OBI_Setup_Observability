@@ -56,3 +56,14 @@ Short, simple notes per phase. Commands are in [runbook.md](runbook.md).
 - **Rollback is clean:** `helm uninstall` → process exits → kernel removes all `obi_*` programs (nothing pinned in bpffs).
 - `rate()` on brand-new series lies for a minute; compare raw counters.
 - App weakness found: inventory seeds Redis only at startup; Redis has no persistence → restarting Redis = empty stock.
+
+## Phase 6: Dashboards, distributed traces, incident
+- Service map without extra components: OBI feature `application_service_graph` → `traces_service_graph_request_total{client,server}` (same names Tempo/Grafana expect). `incoming` = kubelet probes; short-lived processes (curl in loadgen) are never instrumented (min_process_age 5s).
+- Dashboard as code: JSON in git → ConfigMap with label `grafana_dashboard=1` → Grafana sidecar loads it. Tempo's service map panel is computed in the browser (API says "unsupported query type": expected).
+- PromQL traps: dividing by zero 5xx gives "no data" → `(errors or 0*total)/total`.
+- **Context propagation on kernel 6.18.33**: OBI detects a kernel change (FIONREAD misreported for sockets in a sockhash) and needs a fix-up program using `bpf_probe_write_user` → verifier only allows it with **CAP_SYS_ADMIN**. Without it OBI *refuses* propagation (loaded sk_msg programs, but nothing attached, sockhash empty). Safety layers worked: verifier + OBI's own self-check.
+- With SYS_ADMIN (lab only): 2 `cgroup_sock_ops` links + sockhash maps filled; `sk_msg` programs add trace context to outgoing messages. No TC/XDP needed.
+- Results: orders→payments and orders→inventory joined across nodes 100%. Node.js frontend lost in-process linking (OBI's Node injection: EPERM, probably needs CAP_KILL for SIGUSR1). Python FastAPI orders: server span not linked to its own client calls (asyncio→threadpool).
+- Too-low CPU limits kill pods via liveness probes under load (Grafana in Phase 4, Tempo now).
+- **Incident workflow**: RED per service → rule out DB → client-side edge latency → deepest unhealthy service → TraceQL `duration > 800ms` / `status_code >= 500` → one joined cross-node trace shows time is in `processing` inside payments (network ~1 ms, queue 0 ms).
+- Helm gotcha: `helm upgrade` with no values flags keeps earlier `--set` values → use `--reset-values` to return to values.yaml.
