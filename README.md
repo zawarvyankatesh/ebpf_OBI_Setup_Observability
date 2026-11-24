@@ -5,6 +5,7 @@ Zero-code traces and metrics for a small microservices app, using **OBI** (OpenT
 - Plan and context: [CLAUDE.md](CLAUDE.md)
 - Every command we ran: [docs/runbook.md](docs/runbook.md)
 - What we learned: [docs/phase-notes.md](docs/phase-notes.md)
+- Limitations, Node.js issue, trace flow, prod readiness: [docs/observability-deep-dive.md](docs/observability-deep-dive.md)
 
 ## Status
 
