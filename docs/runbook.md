@@ -463,3 +463,31 @@ make bpf-progs                 # obi_* programs: 361 -> 0, total back to ~132
 make obi && kubectl -n shop rollout restart deploy/frontend deploy/orders deploy/inventory deploy/payments deploy/loadgen
 ```
 OBI memory: ~420 MiB on worker (Node+Go+Python), ~250 MiB on worker2 → limit raised to 768Mi.
+
+---
+
+## Phase 6: Dashboards & distributed traces (2026-11-24)
+
+### 6.1 Service graph metrics from OBI (no extra component)
+`observability/values-obi.yaml`: `capture.metrics.features: [application, application_service_graph]`
+```bash
+helm upgrade obi <chart> -n observability -f observability/values-obi.yaml --wait
+kubectl -n shop rollout restart deploy/frontend deploy/orders deploy/inventory deploy/payments deploy/loadgen
+# Prometheus: traces_service_graph_request_total{client, server, connection_type}, _failed_total, _server_seconds, _client_seconds
+curl -s localhost:9090/api/v1/query --data-urlencode 'query=sum by (client, server) (traces_service_graph_request_total)'
+```
+Edges seen: loadgen→frontend, frontend→orders/inventory, orders→inventory/payments/postgres, inventory→redis.
+`incoming → X` = kubelet health checks; `obi-poc-control-plane → frontend` = curl from laptop via NodePort.
+
+### 6.2 Grafana dashboard "Shop: RED (OBI, zero-code)"
+File `observability/dashboards/shop-red.json` (uid `shop-red-obi`), loaded by the Grafana sidecar from a ConfigMap labelled `grafana_dashboard=1`:
+```bash
+make dashboards
+```
+Panels: service map (Tempo serviceMap, drawn in the browser), edges table, req/s, error % (5xx), p95, p50/p95/p99 for `$service`, req/s by status, RED table per route, DB ops/s + DB p95.
+Check every panel returns data (Grafana query API):
+```bash
+curl -s -u admin:$(make -s grafana-pass) localhost:3000/api/dashboards/uid/shop-red-obi | jq '.dashboard.panels[].title'
+# POST /api/ds/query with each panel target (Tempo serviceMap is browser-side: "unsupported query type" on the API is expected)
+```
+Fixes during build: p50 query broken by a text replace; error % showed "no data" with zero 5xx → `(errors or 0 * total) / total`.

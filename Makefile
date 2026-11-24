@@ -3,7 +3,7 @@ CLUSTER := obi-poc
 # image tags: keep in sync with helm/shop/values.yaml
 IMAGES := shop/payments:0.1.0 shop/inventory:0.1.0 shop/orders:0.1.0 shop/frontend:0.2.1 shop/loadgen:0.2.0
 
-.PHONY: cluster nodes build load deploy status pf obs-repos obs grafana-pass obi obi-uninstall bpf-progs clean
+.PHONY: cluster nodes build load deploy status pf obs-repos obs grafana-pass obi obi-uninstall bpf-progs dashboards clean
 
 ## Phase 1: create the kind cluster (1 control-plane + 2 workers)
 cluster:
@@ -72,6 +72,11 @@ bpf-progs:
 	@docker build -q -t local/bpftool:alpine3.20 tools/bpftool >/dev/null
 	@docker run --rm --privileged --pid=host local/bpftool:alpine3.20 -j prog show | \
 	  python3 -c 'import json,sys,collections; p=json.load(sys.stdin); print(len(p), "programs:", dict(collections.Counter(x["type"] for x in p)))'
+
+## Phase 6: load Grafana dashboards (ConfigMap with label grafana_dashboard=1 -> Grafana sidecar)
+dashboards:
+	kubectl -n observability create configmap shop-dashboards --from-file=observability/dashboards/ \
+	  --dry-run=client -o yaml | kubectl label --local -f - grafana_dashboard=1 -o yaml | kubectl apply -f -
 
 ## Delete everything
 clean:

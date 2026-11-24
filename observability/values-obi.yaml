@@ -75,7 +75,7 @@ config:
                 kubernetes:
                   namespace_glob: ['shop']
           metrics:
-            features: [application]       # RED metrics per service. Service graph comes in Phase 6.
+            features: [application, application_service_graph]   # RED + "who calls whom" (service map)
           engine:
             propagation:
               context_propagation: disabled   # Phase 6 will set "all"
